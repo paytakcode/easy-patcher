@@ -2,30 +2,41 @@ use rfd::FileDialog;
 use std::fs;
 use std::path::PathBuf;
 use dialoguer::{Select, Input};
+use strum::IntoEnumIterator;
+use strum_macros::{EnumIter, EnumString};
+use std::str::FromStr;
 
 struct File {
     path : String,
     name : String,
 }
 
-enum Action {
+#[derive(Debug, EnumIter, EnumString)]
+enum ExecuteAction {
     Move,
     Copy,
     Delete,
     Unzip,
 }
 
+#[derive(Debug)]
+enum RootAction {
+    Execute,
+    Setting,
+    Exit,
+}
+
 struct Config {
     files : Vec<File>,
-    actions : Vec<>
+    action_list: Vec<(File, ExecuteAction)>
 }
 
 fn main() {
     println!("-------- Easy Patcher By KTS ---------");
     
+    let root_action = vec![RootAction::Execute, RootAction::Setting, RootAction::Exit];
     
-    let root_action = vec!["Execute", "Setting", "Exit"];
-    
+    println!("{:?}", RootAction::Execute);
     
     // 1. 파일 추가 버튼 (CLI 방식으로 처리)
     let file_path = FileDialog::new()
@@ -35,7 +46,7 @@ fn main() {
     // 2~3. 파일 경로 저장 및 출력
     let file_path = match file_path {
         Some(path) => {
-            println!("파일 경로가 선택되었습니다: {}", path.display());
+            println!("파일이 선택되었습니다: {}", path.display());
             path
         }
         None => {
@@ -48,7 +59,10 @@ fn main() {
     println!("\n2. Choose an action for the file!");
 
     // 사용자에게 제공할 작업 옵션 제공 (CLI 메뉴)
-    let actions = vec!["Move", "Copy", "Delete", "Unzip"];
+    let actions: Vec<String> = ExecuteAction::iter()
+        .map(|action| format!("{:?}", action))
+        .collect();
+    
     let selection = Select::new()
         .with_prompt("Choose an action for the file")
         .items(&actions)
@@ -57,12 +71,11 @@ fn main() {
         .unwrap();
 
     // 사용자 입력에 따른 작업 실행
-    match actions[selection] {
-        "Move" => move_file(&file_path),
-        "Copy" => copy_file(&file_path),
-        "Delete" => delete_file(&file_path),
-        "Unzip" => unzip_file(&file_path),
-        _ => println!("잘못된 작업 선택"),
+    match ExecuteAction::from_str(&actions[selection]).unwrap() {
+        ExecuteAction::Move => move_file(&file_path),
+        ExecuteAction::Copy => copy_file(&file_path),
+        ExecuteAction::Delete => delete_file(&file_path),
+        ExecuteAction::Unzip => unzip_file(&file_path),
     }
 }
 
@@ -112,5 +125,3 @@ fn unzip_file(file_path: &PathBuf) {
     println!("파일 압축 해제 요청 - 대상 파일: {}", file_path.display());
     // 실제 압축 해제 기능은 추가 라이브러리가 필요합니다.
 }
-
-fn check_config_file() -> 

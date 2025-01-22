@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 rfd = "0.15.2" #Rust File Dialog
 dialoguer = "0.11.0"    # CLI Interface
+strum = "0.26.3"    # Enum to String
+strum_macros = "0.26.3"    # Enum to String
