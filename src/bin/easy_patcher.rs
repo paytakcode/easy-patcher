@@ -19,7 +19,7 @@ enum ExecuteAction {
     Unzip,
 }
 
-#[derive(Debug)]
+#[derive(Debug, EnumIter, EnumString)]
 enum RootAction {
     Execute,
     Setting,
@@ -34,9 +34,23 @@ struct Config {
 fn main() {
     println!("-------- Easy Patcher By KTS ---------");
     
-    let root_action = vec![RootAction::Execute, RootAction::Setting, RootAction::Exit];
+    // 사용자에게 제공할 작업 옵션 제공 (CLI 메뉴)
+    let root_actions: Vec<String> = RootAction::iter()
+        .map(|action| format!("{:?}", action))
+        .collect();
     
-    println!("{:?}", RootAction::Execute);
+    let selection = Select::new()
+        .items(&root_actions)
+        .default(0)
+        .interact()
+        .unwrap();
+
+    // 사용자 입력에 따른 작업 실행
+    match RootAction::from_str(&root_actions[selection]).unwrap() {
+        RootAction::Execute => choose_task(),
+        RootAction::Setting => load_setting_menu(),
+        RootAction::Exit => exit(),
+    }
     
     // 1. 파일 추가 버튼 (CLI 방식으로 처리)
     let file_path = FileDialog::new()
@@ -79,6 +93,20 @@ fn main() {
     }
 }
 
+fn exit() {
+    println!("Exiting Easy Patcher...");
+    std::process::exit(0);
+}
+
+fn load_setting_menu() {
+    println!("Loading setting menu...");
+    todo!()
+}
+
+fn choose_task() {
+    println!("Loading task list...");
+    todo!()
+}
 // 5. 각 행동 수행 함수 선언
 
 /// 파일 이동 함수
