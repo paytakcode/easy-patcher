@@ -1,15 +1,58 @@
 use std::fmt::Debug;
 use rfd::FileDialog;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::Path;
 use std::path::PathBuf;
+use serde::{Serialize, Deserialize};
 use dialoguer::{Select, Input};
 use strum::IntoEnumIterator;
 use strum_macros::{EnumIter, EnumString};
 use std::str::FromStr;
 
-struct File {
-    path : String,
-    name : String,
+#[derive(Debug, Serialize, Deserialize)]
+struct AppConfig {
+    tasks: Vec<String>,
+}
+
+impl AppConfig {
+    /// 새로운 Task를 추가하고, 바로 파일로 저장합니다.
+    pub fn add_task(&mut self, task_name: &str, config_file_path: &str) -> std::io::Result<()> {
+        self.tasks.push(task_name.to_string());
+        self.save(config_file_path)?;
+        Ok(())
+    }
+
+    /// 설정 파일에서 config.json을 읽고, 객체로 반환합니다.
+    pub fn load(config_file_path: &str) -> Self {
+        // config.json이 없으면 디폴트 객체 반환
+        if !Path::new(config_file_path).exists() {
+            return AppConfig {
+                tasks: Vec::new(),
+            };
+        }
+
+        // 파일 열고 JSON 파싱
+        let mut file = File::open(config_file_path)
+            .expect("설정 파일을 열 수 없습니다");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .expect("설정 파일을 읽어올 수 없습니다");
+
+        serde_json::from_str::<AppConfig>(&contents)
+            .unwrap_or(AppConfig {
+                tasks: Vec::new(),
+            })
+    }
+
+    /// 현재 객체를 config.json으로 저장합니다.
+    pub fn save(&self, config_file_path: &str) -> std::io::Result<()> {
+        let json_data = serde_json::to_string_pretty(self)
+            .expect("JSON 직렬화에 실패했습니다.");
+        let mut file = File::create(config_file_path)?;
+        file.write_all(json_data.as_bytes())?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, EnumIter, EnumString)]
@@ -21,32 +64,33 @@ enum ExecuteAction {
 }
 
 #[derive(Debug, EnumIter, EnumString)]
-enum RootMenu {
+enum MainMenu {
     Execute,
     Setting,
     Exit,
 }
 
-struct Config {
-    files : Vec<File>,
-    action_list: Vec<(File, ExecuteAction)>
+#[derive(Debug, EnumIter, EnumString)]
+enum SettingMenu {
+    AddTask,
+    TaskList,
+    Exit,
 }
 
 fn main() {
     println!("-------- Easy Patcher By KTS ---------");
-    
-    let selection = get_selection::<RootMenu>(Some("choose a menu".to_string()));
 
-    match RootMenu::from_str(&selection).unwrap() {
-        RootMenu::Execute => choose_task(),
-        RootMenu::Setting => load_setting_menu(),
-        RootMenu::Exit => exit(),
-    }
+    
+    let config_file_path = "config.json";
+    let mut config = AppConfig::load(config_file_path);
+    config.save(config_file_path).unwrap();
+    
+    load_main_menu();
     
     // 1. 파일 추가 버튼 (CLI 방식으로 처리)
     let file_path = FileDialog::new()
-        .pick_file() // 파일 선택 대화창 열기
-        .and_then(|path| Some(path)); // File Path 처리
+        .pick_file()
+        .and_then(|path| Some(path));
 
     // 2~3. 파일 경로 저장 및 출력
     let file_path = match file_path {
@@ -59,9 +103,6 @@ fn main() {
             return;
         }
     };
-
-    // 4. 액션 버튼 추가
-    println!("\n2. Choose an action for the file!");
 
     // 사용자에게 제공할 작업 옵션 제공 (CLI 메뉴)
     let actions: Vec<String> = ExecuteAction::iter()
@@ -90,11 +131,31 @@ fn exit() {
 }
 
 fn load_setting_menu() {
-    println!("Loading setting menu...");
+    let selection = get_selection::<SettingMenu>(Some("choose a menu".to_string()));
+    
+    match SettingMenu::from_str(&selection).unwrap() {
+        SettingMenu::AddTask => add_task(),
+        SettingMenu::TaskList => load_task_list(),
+        SettingMenu::Exit => load_main_menu(),
+    }
+}
+
+fn load_main_menu() {
+    let selection = get_selection::<MainMenu>(Some("choose a menu".to_string()));
+
+    match MainMenu::from_str(&selection).unwrap() {
+        MainMenu::Execute => load_task_list(),
+        MainMenu::Setting => load_setting_menu(),
+        MainMenu::Exit => exit(),
+    }
+}
+
+fn add_task() {
+    println!("Loading add task menu...");
     todo!()
 }
 
-fn choose_task() {
+fn load_task_list() {
     println!("Loading task list...");
     todo!()
 }

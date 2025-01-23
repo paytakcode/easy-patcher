@@ -7,4 +7,6 @@ edition = "2021"
 rfd = "0.15.2" #Rust File Dialog
 dialoguer = "0.11.0"    # CLI Interface
 strum = "0.26.3"    # Enum to String
-strum_macros = "0.26.3"    # Enum to String
+strum_macros = "0.26.3"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.137"    # Enum to String
