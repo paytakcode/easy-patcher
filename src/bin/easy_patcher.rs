@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use rfd::FileDialog;
 use std::fs;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ enum ExecuteAction {
 }
 
 #[derive(Debug, EnumIter, EnumString)]
-enum RootAction {
+enum RootMenu {
     Execute,
     Setting,
     Exit,
@@ -34,22 +35,12 @@ struct Config {
 fn main() {
     println!("-------- Easy Patcher By KTS ---------");
     
-    // 사용자에게 제공할 작업 옵션 제공 (CLI 메뉴)
-    let root_actions: Vec<String> = RootAction::iter()
-        .map(|action| format!("{:?}", action))
-        .collect();
-    
-    let selection = Select::new()
-        .items(&root_actions)
-        .default(0)
-        .interact()
-        .unwrap();
+    let selection = get_selection::<RootMenu>(Some("choose a menu".to_string()));
 
-    // 사용자 입력에 따른 작업 실행
-    match RootAction::from_str(&root_actions[selection]).unwrap() {
-        RootAction::Execute => choose_task(),
-        RootAction::Setting => load_setting_menu(),
-        RootAction::Exit => exit(),
+    match RootMenu::from_str(&selection).unwrap() {
+        RootMenu::Execute => choose_task(),
+        RootMenu::Setting => load_setting_menu(),
+        RootMenu::Exit => exit(),
     }
     
     // 1. 파일 추가 버튼 (CLI 방식으로 처리)
@@ -107,7 +98,24 @@ fn choose_task() {
     println!("Loading task list...");
     todo!()
 }
-// 5. 각 행동 수행 함수 선언
+
+fn get_selection<T: IntoEnumIterator + Debug>(prompt: Option<String>) -> String {
+    let items: Vec<String> = T::iter()
+        .map(|item| format!("{:?}", item))
+        .collect();
+
+    let mut select = Select::new()
+        .items(&items)
+        .default(0);
+
+    if let Some(prompt) = prompt {
+        select = select.with_prompt(prompt);
+    }
+
+    let selection = select.interact().unwrap();
+
+    items[selection].clone()
+}
 
 /// 파일 이동 함수
 fn move_file(file_path: &PathBuf) {
