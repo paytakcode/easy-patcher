@@ -1,4 +1,6 @@
-use dialoguer::{Input, Select};
+use std::collections::HashSet;
+use dialoguer::{MultiSelect, Confirm, Input, Select};
+use chrono::Local;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -10,7 +12,20 @@ use std::str::FromStr;
 use strum::IntoEnumIterator;
 use strum_macros::{EnumIter, EnumString};
 use zip::read::ZipArchive;
-
+use git::{ChangedFile, CommitInfo};
+use svn::RevisionInfo;
+/*TODO
+1. excute run 하면 각 프로젝트 별로 SVN 히스토리 불러오기
+2. 프로젝트별로 패치할 히스토리 체크박스로 선택
+3. 아무 히스토리도 선택하지 않은 프로젝트 제외하고 선택한 히스토리를 통해 변경되야할 파일 목록 출력(confirm, cancel)
+4. confirm 하면 프로젝트별로 build_file_path 순회해서 war파일인 경우 unzip(이때 unzip할 폴더명이 해당 경로에 존재하면 삭제 후 unzip)
+4. 더이상 프로젝트가 존재하지 않으면 execute_task_with_timestamp 함수 호출하는데 지금은 시간폴더 내 동일한 위치에 생성하지만 각 프로젝트명 별로 폴더를 만들어서 해당 폴더 내에 복사하는 로직으로 변경
+5. 각 프로젝트 폴더 내에 아까 선택한 히스토리 정보가 담긴 파일을 추가
+6. 각 프로젝트 별로 리눅스에서 실행가능한 bash스크립트 파일을 추가하는데 
+    실행하면 "patch, target setting, exit" 옵션이 있고  target setting을 통해 패치할 경로를 추가하게 함(여러 경로 추가 가능)
+    patch를 실행하면 저장된 타겟폴더 내에서 히스토리 정보에 맞춰 파일들을 패치하기전에 백업을 진행 > 패치할 파일들을 전부 스크립트 경로와 동일한 위치에 bak_날짜시간 폴더를 만들어서 백업해둠
+    백업이 완료되면 히스토리 정보에 맞춰 파일을 추가/덮어씌우기/삭제를 진행 
+*/
 const CONFIG_FILE_PATH: &str = "config.json";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,15 +34,23 @@ struct Task {
     target_files: Vec<TargetFile>,
     actions: Vec<Action>,
     projects: Vec<Project>,
+    output_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Project {
     path: String,
     vcs_type: VcsType,
+    build_file_path: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
+pub enum ProjectHistory {
+    GitHistory(String, Vec<CommitInfo>),
+    SvnHistory(String, Vec<RevisionInfo>),
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 enum VcsType {
     Git,
     Svn,
@@ -41,6 +64,7 @@ impl Task {
             target_files: Vec::new(),
             actions: Vec::new(),
             projects: Vec::new(),
+            output_dir: None,
         }
     }
 }
@@ -99,7 +123,6 @@ impl AppConfig {
     }
 
     pub fn load() -> Self {
-        // config.json이 없으면 디폴트 객체 반환
         if !Path::new(CONFIG_FILE_PATH).exists() {
             return AppConfig {
                 tasks: Vec::new(),
@@ -160,6 +183,7 @@ enum SettingMenu {
 #[derive(Debug, EnumIter, EnumString)]
 enum TaskMenu {
     NewAction,
+    Setting,
     AddTargetFile,
     AddProject,
     ActionList,
@@ -168,11 +192,17 @@ enum TaskMenu {
     Back,
 }
 
+#[derive(Debug, EnumIter, EnumString)]
+enum TaskSettingMenu {
+    OutputDir,
+    BuildFilePath,
+    Back,
+}
+
 fn main() {
     let mut config = AppConfig::load();
 
     loop {
-        // 메인 메뉴 선택
         let selection = get_selection_from_enum::<MainMenu>(Some("---------- Easy Patcher ----------\nchoose a menu"));
         match MainMenu::from_str(&selection).unwrap() {
             MainMenu::Execute => {
@@ -189,7 +219,6 @@ fn main() {
     }
 }
 
-/// 실행(Execute) 메뉴 흐름
 fn run_execute_menu(config: &mut AppConfig) {
     let mut task_names: Vec<String> = config.tasks
         .iter()
@@ -201,10 +230,11 @@ fn run_execute_menu(config: &mut AppConfig) {
     if selected_task == "Back" {
         return;
     }
+    run_svn_patching_flow(config.get_task_mut(&selected_task).unwrap().projects.as_slice()).expect("TODO: panic message");
+    execute_task_with_timestamp(&config.get_task(&selected_task).unwrap()).unwrap();
     execute_action_list(config, &selected_task);
 }
 
-/// 설정(Setting) 메뉴 흐름
 fn run_setting_menu(config: &mut AppConfig) {
     loop {
         let selection = get_selection_from_enum::<SettingMenu>(Some("---------- Setting Menu ----------"));
@@ -216,40 +246,62 @@ fn run_setting_menu(config: &mut AppConfig) {
                 show_task_list(config);
             },
             SettingMenu::Back => {
-                // 설정 메뉴 탈출
                 break;
             },
         }
     }
 }
 
-fn main_menu() {
-    let selection = get_selection_from_enum::<MainMenu>(Some("---------- Easy Patcher ----------\nchoose a menu"));
-
-    let mut config = AppConfig::load();
-    match MainMenu::from_str(&selection).unwrap() {        
-        MainMenu::Execute => {
-            // 실행할 Task를 선택하고 액션 실행
-            let mut task_names = config.tasks
-                .iter()
-                .map(|task| task.name.clone())
-                .collect::<Vec<String>>();
-            task_names.push("Back".to_string());
-    
-            let selected_task = get_selection_from_str(task_names, Some("실행할 Task를 선택하세요"));
-            if selected_task == "Back" {
-                main_menu();
-            } else {
-                execute_action_list(&config , &selected_task);
-                // 실행 후 필요하다면 다시 메뉴로 돌아가기
-                main_menu();
+fn run_task_setting_menu(config: &mut AppConfig, task_name: &str) {
+    loop {
+        let selection = get_selection_from_enum::<TaskSettingMenu>(None);
+        match TaskSettingMenu::from_str(&selection).unwrap() {
+            TaskSettingMenu::OutputDir => {
+                if let Some(file_path) = FileDialog::new()
+                    .add_filter("All Files", &["*"])
+                    .pick_folder()
+                {
+                    let output_dir = Path::new(&file_path).to_str().unwrap();
+                    if let Some(task) = config.get_task_mut(task_name) {
+                        task.output_dir = Some(output_dir.parse().unwrap());
+                    }
+                    if let Err(e) = config.save() {
+                        println!("save error: {}", e);
+                    }
+                }
+            },
+            TaskSettingMenu::BuildFilePath => {
+                let mut project_names = config.get_task_mut(task_name)
+                    .unwrap().projects.iter()
+                    .map(|proj| proj.path.clone() + "[" + {proj.build_file_path.as_ref().unwrap_or(&String::from("Not set"))} + "]")
+                    .collect::<Vec<String>>();
+                project_names.push("Back".to_string());
+                let selection = get_selection_from_str(project_names, Some("choose a task"));
+                if selection == "Back" {
+                    return;
+                } else {
+                    if let Some(file_path) = FileDialog::new()
+                        .add_filter("All Files", &["*"])
+                        .pick_file()
+                    {
+                        let build_file_path = Path::new(&file_path).to_str().unwrap();
+                        if let Some(task) = config.get_task_mut(task_name) {
+                            task.projects.iter_mut().find(|proj| proj.path == selection.split("[").next().unwrap() )
+                                .unwrap().build_file_path = Some(build_file_path.parse().unwrap());
+                        }
+                        if let Err(e) = config.save() {
+                            println!("save error: {}", e);
+                        }
+                    }
+                }
             }
-        },
-        MainMenu::Setting => setting_menu(&mut config),
-        MainMenu::Exit => exit(),
+            _ => {
+                println!("Not implemented yet");
+            }
+        }
     }
 }
-/// Task 추가 함수
+
 fn add_task(config: &mut AppConfig) {
     let task_name: String = Input::new()
         .with_prompt("Enter new task name:")
@@ -266,7 +318,6 @@ fn add_task(config: &mut AppConfig) {
     }
 }
 
-/// Task 목록을 보여주고, 선택된 Task에 대해 TaskMenu 실행
 fn show_task_list(config: &mut AppConfig) {
     let mut task_names = config.tasks
         .iter()
@@ -282,18 +333,17 @@ fn show_task_list(config: &mut AppConfig) {
         let menu_sel = get_selection_from_enum::<TaskMenu>(Some("choose menu for task"));
         match TaskMenu::from_str(&menu_sel).unwrap() {
             TaskMenu::NewAction => add_action(config, &selection),
+            TaskMenu::Setting => run_task_setting_menu(config, &selection),
             TaskMenu::AddTargetFile => add_target_file(config, &selection),
-            TaskMenu::AddProject => {
-                add_project(config, &selection);
-            },
+            TaskMenu::AddProject => add_project(config, &selection),
             TaskMenu::ActionList => action_list(config, &selection),
             TaskMenu::ProjectList => show_project_history_menu(config, &selection),
             TaskMenu::DeleteTask => {
                 delete_task(config, &selection);
-                break; // 삭제 후 목록으로 돌아가기
+                break;
             },
             TaskMenu::Back => {
-                break; // Task 메뉴 탈출 → TaskList 메뉴로 복귀
+                break;
             },
         }
     }
@@ -302,13 +352,10 @@ fn show_task_list(config: &mut AppConfig) {
 fn add_project(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task_mut(task_name) {
         println!("프로젝트 폴더를 선택하세요:");
-        // 폴더 선택
         if let Some(folder_path) = FileDialog::new().pick_folder() {
             let folder_str = folder_path.display().to_string();
             let git_path = folder_path.join(".git");
             let svn_path = folder_path.join(".svn");
-
-            // VCS 종류 판별
             let vcs_type = if git_path.exists() {
                 VcsType::Git
             } else if svn_path.exists() {
@@ -317,10 +364,10 @@ fn add_project(config: &mut AppConfig, task_name: &str) {
                 VcsType::Unknown
             };
 
-            // Project 객체 생성 후 Task에 추가
             let new_project = Project {
                 path: folder_str,
                 vcs_type,
+                build_file_path: None
             };
             task.projects.push(new_project);
 
@@ -335,14 +382,56 @@ fn add_project(config: &mut AppConfig, task_name: &str) {
     }
 }
 
-/// 특정 Task 삭제
 fn delete_task(config: &mut AppConfig, task_name: &str) {
     config.tasks.retain(|task| task.name != task_name);
     if let Err(e) = config.save() {
         println!("delete_task save error: {}", e);
     }
 }
-/// 특정 Task의 Action을 순차적으로 실행하는 함수
+fn execute_task_with_timestamp(task: &Task) -> std::io::Result<()> {
+    use chrono::Local;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    // 1. 현재 날짜와 시간을 받아 폴더 이름을 생성합니다.
+    let now = Local::now();
+    let folder_name = now.format("%Y%m%d_%H%M%S").to_string();
+
+    // 2. Task에 설정된 output_dir이 있는지 확인 후, 새로운 폴더 경로를 구성합니다.
+    let base_output_dir = match &task.output_dir {
+        Some(dir) => dir,
+        None => {
+            println!("output_dir가 설정되어 있지 않습니다.");
+            return Ok(());
+        }
+    };
+    let new_folder_path = Path::new(base_output_dir).join(folder_name);
+
+    // 3. 새 폴더를 생성합니다.
+    fs::create_dir_all(&new_folder_path)?;
+
+    // 4. Task에 포함된 모든 Project를 확인하고, build_file_path가 있으면 복사합니다.
+    for project in &task.projects {
+        if let Some(ref build_path) = project.build_file_path {
+            let src_path = PathBuf::from(build_path);
+            if src_path.is_file() {
+                // 원본 파일 이름을 구해서, 새로 만든 폴더 안에 같은 이름으로 복사합니다.
+                if let Some(file_name) = src_path.file_name() {
+                    let dest_path = new_folder_path.join(file_name);
+                    fs::copy(&src_path, &dest_path)?;
+                    println!("파일 복사 완료: {:?} -> {:?}", src_path, dest_path);
+                }
+            } else {
+                println!("프로젝트의 build_file_path가 올바른 파일이 아닙니다: {}", build_path);
+            }
+        } else {
+            println!("프로젝트에 build_file_path가 설정되어 있지 않습니다: {}", project.path);
+        }
+    }
+    println!("작업이 완료되었습니다: {:?}", new_folder_path);
+    Ok(())
+}
+
 fn execute_action_list(config: &AppConfig, task_name: &str) {
     if let Some(task) = config.get_task(task_name) {
         for action in &task.actions {
@@ -370,7 +459,6 @@ fn execute_action_list(config: &AppConfig, task_name: &str) {
     }
 }
 
-/// Action 목록 출력
 fn action_list(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task(task_name) {
         for (index, action) in task.actions.iter().enumerate() {
@@ -378,34 +466,11 @@ fn action_list(config: &mut AppConfig, task_name: &str) {
         }
     }
 }
-/// 새 Action 추가
+
 fn add_action(config: &mut AppConfig, task_name: &str) {
     command_list(config, task_name);
 }
 
-fn setting_menu(config: &mut AppConfig) {
-    let selection = get_selection_from_enum::<SettingMenu>(None);
-
-    match SettingMenu::from_str(&selection).unwrap() {
-        SettingMenu::NewTask => add_task(config),
-        SettingMenu::TaskList => task_list(),
-        SettingMenu::Back => main_menu(),
-    }
-}
-
-fn task_list() {
-    let mut config = AppConfig::load();
-    let mut task_names = config.tasks.iter().map(|task| task.name.clone()).collect::<Vec<String>>();
-    task_names.push("Back".to_string());
-    let selection = get_selection_from_str(task_names, Some("choose a task"));
-    if selection == "Back" {
-        setting_menu(&mut config);
-    } else { 
-        task_menu(&selection);
-    }
-}
-
-/// Enum 선택 시 사용
 fn get_selection_from_enum<T: IntoEnumIterator + Debug>(prompt: Option<&str>) -> String {
     let items: Vec<String> = T::iter().map(|item| format!("{:?}", item)).collect();
     let mut select = Select::new().items(&items).default(0);
@@ -417,7 +482,6 @@ fn get_selection_from_enum<T: IntoEnumIterator + Debug>(prompt: Option<&str>) ->
     items[selection].clone()
 }
 
-/// 일반 String 목록 선택 시 사용
 fn get_selection_from_str(items: Vec<String>, prompt: Option<&str>) -> String {
     let mut select = Select::new().items(&items).default(0);
 
@@ -428,7 +492,6 @@ fn get_selection_from_str(items: Vec<String>, prompt: Option<&str>) -> String {
     items[selection].clone()
 }
 
-/// 파일 이동 함수
 fn move_file(source: &str, destination: &str) {
     if let Err(e) = fs::rename(source, destination) {
         println!("파일 이동 실패: {}", e);
@@ -451,7 +514,6 @@ fn copy_file(source: &PathBuf) {
     }
 }
 
-/// 파일 삭제 함수
 fn delete_file(target_file: &String) {
     let path = Path::new(target_file);
     if let Err(e) = fs::remove_file(path) {
@@ -461,7 +523,6 @@ fn delete_file(target_file: &String) {
     }
 }
 
-/// 파일 압축 해제 함수 (dummy 구현)
 fn unzip_file(zip_path: &str, output_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
@@ -471,11 +532,11 @@ fn unzip_file(zip_path: &str, output_dir: &str) -> Result<(), Box<dyn std::error
         let out_path = Path::new(output_dir);
 
         if file_in_zip.is_dir() {
-            std::fs::create_dir_all(&out_path)?;
+            fs::create_dir_all(&out_path)?;
         } else {
             if let Some(parent) = out_path.parent() {
                 if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
+                    fs::create_dir_all(parent)?;
                 }
             }
             let mut out_file = File::create(&out_path)?;
@@ -485,24 +546,6 @@ fn unzip_file(zip_path: &str, output_dir: &str) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-
-fn task_menu(task_name: &str) {
-    let mut config = AppConfig::load();
-    let selection = get_selection_from_enum::<TaskMenu>(Some("choose menu for task"));
-
-    match TaskMenu::from_str(&selection).unwrap() {
-        TaskMenu::NewAction => add_action(&mut config, task_name),
-        TaskMenu::AddTargetFile => add_target_file(&mut config, task_name),
-        TaskMenu::AddProject => add_project(&mut config, task_name),
-        TaskMenu::ActionList => action_list(&mut config, task_name),
-        TaskMenu::ProjectList => show_project_history_menu(&mut config, task_name),
-        TaskMenu::DeleteTask => delete_task(&mut config, task_name),
-        TaskMenu::Back => task_list(),
-    }
-    
-}
-
-/// 명령어 목록 중에서 하나를 선택한 후 해당 Action 추가
 fn command_list(config: &mut AppConfig, task_name: &str) {
     let selection = get_selection_from_enum::<Command>(Some("choose a command for action"));
     match Command::from_str(&selection).unwrap() {
@@ -513,7 +556,6 @@ fn command_list(config: &mut AppConfig, task_name: &str) {
     }
 }
 
-/// Delete 명령어용 Action 추가
 fn add_delete_action(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task_mut(task_name) {
         if let Some(target_file) = pick_target_file(&task.target_files, "choose a target file to delete") {
@@ -526,7 +568,6 @@ fn add_delete_action(config: &mut AppConfig, task_name: &str) {
     }
 }
 
-/// Unzip 명령어용 Action 추가
 fn add_unzip_action(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task_mut(task_name) {
         if let Some(file) = pick_target_file(&task.target_files, "압축을 풀 파일을 선택하세요") {
@@ -546,23 +587,18 @@ fn add_unzip_action(config: &mut AppConfig, task_name: &str) {
     }
 }
 
-/// 프로젝트 목록을 보여주고 선택한 프로젝트의 히스토리를 확인하는 예시
 fn show_project_history_menu(config: &mut AppConfig, task_name: &str) {
-    // Task 가져오기
     if let Some(task) = config.get_task_mut(task_name) {
-        // 프로젝트가 하나도 없으면 종료
         if task.projects.is_empty() {
             println!("등록된 프로젝트가 없습니다.");
             return;
         }
 
-        // 프로젝트 경로 목록 (메뉴용)
         let mut project_paths: Vec<String> = task.projects.iter()
             .map(|proj| format!("{} ({:?})", proj.path, proj.vcs_type))
             .collect();
         project_paths.push("Back".to_string());
 
-        // 프로젝트 선택
         let selected_project = get_selection_from_str(
             project_paths,
             Some("히스토리를 확인할 프로젝트를 선택하세요"),
@@ -572,12 +608,8 @@ fn show_project_history_menu(config: &mut AppConfig, task_name: &str) {
             return;
         }
 
-        // 실제 Project 찾기
-        // selected_project는 "경로 (VcsType)" 형식이므로, 경로 부분만 떼어내서 검색
-        // 여기서는 간단하게 문자열 Split 후 맨 앞의 경로 부분으로만 매칭
         let path_part = selected_project.split(" (").next().unwrap_or("");
         if let Some(chosen_proj) = task.projects.iter().find(|p| p.path == path_part) {
-            // 프로젝트 히스토리 확인 로직
             show_project_history(chosen_proj);
         } else {
             println!("프로젝트를 찾을 수 없습니다.");
@@ -619,11 +651,9 @@ fn run_vcs_command(project_path: &str, command: &str, args: &[&str]) -> std::io:
         .current_dir(project_path) // 특정 프로젝트 경로에서 실행
         .output()?;
 
-    // UTF-8로 가정하고 문자열 변환
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// TargetFile 중 하나를 대화형으로 선택
 fn pick_target_file<'a>(files: &'a [TargetFile], prompt: &str) -> Option<&'a TargetFile> {
     if files.is_empty() {
         println!("등록된 파일이 없습니다.");
@@ -634,7 +664,6 @@ fn pick_target_file<'a>(files: &'a [TargetFile], prompt: &str) -> Option<&'a Tar
     files.iter().find(|f| f.name == selected_name)
 }
 
-/// Copy 명령어용 Action 추가
 fn add_copy_action(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task_mut(task_name) {
         if let Some(file) = pick_target_file(&task.target_files, "복사할 파일을 선택하세요") {
@@ -654,7 +683,6 @@ fn add_copy_action(config: &mut AppConfig, task_name: &str) {
     }
 }
 
-/// Move 명령어용 Action 추가
 fn add_move_action(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task_mut(task_name) {
         if let Some(file) = pick_target_file(&task.target_files, "이동할 파일을 선택하세요") {
@@ -679,7 +707,6 @@ fn add_move_action(config: &mut AppConfig, task_name: &str) {
     }
 }
 
-/// TargetFile 추가
 fn add_target_file(config: &mut AppConfig, task_name: &str) {
     if let Some(task) = config.get_task_mut(task_name) {
         let options = vec!["Input Manually".to_string(), "Input By File Dialog".to_string(), "Cancel".to_string()];
@@ -717,27 +744,21 @@ fn add_target_file(config: &mut AppConfig, task_name: &str) {
                 }
             },
             "Cancel" => {
-                // 취소
             },
             _ => {}
         }
     }
 }
 
-/// Git용 히스토리 목록(커밋 목록)을 가져오고, 각 항목(커밋)을 선택하게 한 뒤 변경 파일 정보를 보여주는 예시
 fn interactive_git_history(project_path: &str) -> std::io::Result<()> {
-    // 1) 히스토리 조회: git log --oneline
     let log_output = run_vcs_command(project_path, "git", &["log", "--oneline"])?;
 
-    // 2) 각 줄이 커밋 하나에 해당하므로, 커밋 목록을 벡터로 분리
     let commits: Vec<&str> = log_output.lines().collect();
     if commits.is_empty() {
         println!("조회된 Git 커밋이 없습니다.");
         return Ok(());
     }
 
-    // 3) 대화형 Select로 커밋을 선택
-    //    예) "abcd123 Add new feature"
     let mut select_items = commits.clone();
     select_items.push("뒤로 가기");
     let selected = Select::new()
@@ -746,20 +767,15 @@ fn interactive_git_history(project_path: &str) -> std::io::Result<()> {
         .default(0)
         .interact().unwrap();
 
-    // 사용자가 '뒤로 가기'를 선택하면 종료
     if select_items[selected] == "뒤로 가기" {
         return Ok(());
     }
 
     let chosen_line = select_items[selected];
-    // 커밋 해시 추출 (Git oneline: 맨 앞 부분이 해시)
-    // 예) "abcd123 Add new feature"에서 맨 첫 단어를 해시로 가정
     let commit_hash = chosen_line.split_whitespace().next().unwrap_or("");
 
     // 4) 변경 파일 정보 조회: git show --name-only <commit_hash>
     let show_output = run_vcs_command(project_path, "git", &["show", "--name-only", commit_hash])?;
-    // name-only 옵션을 사용하면 변경된 파일 목록이 마지막에 나옵니다.
-    // 필요하다면 추가 파싱을 진행 가능
 
     println!("선택하신 커밋 [{}]에서 변경된 파일 정보:", commit_hash);
     println!("{}", show_output);
@@ -767,21 +783,11 @@ fn interactive_git_history(project_path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// SVN용 히스토리 목록(리비전 목록)을 가져오고, 각 항목(리비전)을 선택하게 한 뒤 변경 파일 정보를 보여주는 예시
 fn interactive_svn_history(project_path: &str) -> std::io::Result<()> {
-    // 1) 리비전 목록 조회: svn log -q
-    //    -q 옵션: 불필요한 상세 내용을 생략하고 리비전, 작성자, 날짜만 간략히 출력
     let log_output = run_vcs_command(project_path, "svn", &["log", "-q"])?;
 
-    // 2) 리비전 목록 파싱
-    //    일반적으로 svn log -q 결과는 아래와 비슷한 형식으로 나오며,
-    //    "------------------------------------------------------------------------"
-    //    "r123 | user | 2023-10-10 12:34:56 +0900 (Tue, 10 Oct 2023)"
-    //    "------------------------------------------------------------------------"
-    //    와 유사합니다. 여기서는 단순히 "r123"을 추출하는 방식으로 대화형 목록을 구성합니다.
     let mut revisions = Vec::new();
     for line in log_output.lines() {
-        // 예: r123 | user ...
         if line.starts_with('r') && line.contains(" | ") {
             revisions.push(line.to_string());
         }
@@ -792,7 +798,6 @@ fn interactive_svn_history(project_path: &str) -> std::io::Result<()> {
         return Ok(());
     }
 
-    // 3) 사용자에게 리비전 선택
     revisions.push("뒤로 가기".to_string());
     let selected = Select::new()
         .with_prompt("조회할 SVN 리비전을 선택하세요")
@@ -804,15 +809,10 @@ fn interactive_svn_history(project_path: &str) -> std::io::Result<()> {
         return Ok(());
     }
 
-    // r123 | user ...
     let chosen_line = &revisions[selected];
-    // 맨 앞의 r123 숫자를 추출(공백 전까지)
     let rev_str = chosen_line.split_whitespace().next().unwrap_or("");
-    // "r123"에서 숫자만 추출
     let revision_num = rev_str.trim_start_matches('r');
 
-    // 4) 변경 파일 조회: svn log -v -r <revision> 
-    //    -v 옵션: 변경된 파일(Added, Modified, Deleted 등) 정보를 표시
     let show_output = run_vcs_command(project_path, "svn", &["log", "-v", "-r", revision_num])?;
     println!("선택하신 리비전 [{}]에서 변경된 파일 정보:", rev_str);
     println!("{}", show_output);
@@ -820,7 +820,6 @@ fn interactive_svn_history(project_path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 프로젝트의 유형에 맞춰 히스토리 확인 후, 커밋/리비전 선택과 변경 파일 정보를 조회하도록 연결해주는 함수
 fn interactive_project_history(project: &Project) {
     match project.vcs_type {
         VcsType::Git => {
@@ -841,7 +840,207 @@ fn interactive_project_history(project: &Project) {
     }
 }
 
-fn exit() {
-    println!("Exiting Easy Patcher...");
-    std::process::exit(0);
+
+/// (1) 실행 시 각 프로젝트별 SVN 히스토리를 불러와서, 원하는 리비전(혹은 여러 리비전)을 체크박스로 선택하게 하는 예시
+/// (2) 사용자가 선택하지 않은 프로젝트는 제외
+/// (3) 선택된 히스토리를 기반으로 변경될 파일 목록을 출력 후, 사용자에게 적용 여부를 묻는다 (Confirm)
+pub fn run_svn_patching_flow(projects: &[Project]) -> std::io::Result<()> {
+    // 1. 각 프로젝트에서 Git 히스토리 불러오기
+    let mut project_histories: Vec<ProjectHistory> = Vec::new();
+    for proj in projects {
+        if proj.vcs_type == VcsType::Git {
+            println!("프로젝트 [{}]의 Git 히스토리를 불러오는 중...", proj.path);
+            let revisions = git::get_commit_history(&proj.path);
+            match revisions {
+                Ok(commit_list) => {
+                    // commit_list는 Vec<CommitInfo> 이므로 그대로 넣습니다.
+                    project_histories.push(ProjectHistory::GitHistory(proj.path.clone(), commit_list));
+                }
+                Err(e) => {
+                    // 에러 처리 로직 (로그 출력 등)
+                    eprintln!("히스토리를 가져오는 중 오류가 발생: {:?}", e);
+                }
+            }
+        } else if proj.vcs_type == VcsType::Svn {
+            println!("프로젝트 [{}]의 Svn 히스토리를 불러오는 중...", proj.path);
+            let revisions = svn::get_svn_history(&proj.path, 10);
+            match revisions {
+                Ok(revision_info_list) => {
+                    // revision_info_list Vec<RevisionInfo> 이므로 그대로 넣습니다.
+                    project_histories.push(ProjectHistory::SvnHistory(proj.path.clone(), revision_info_list));
+                }
+                Err(e) => {
+                    // 에러 처리 로직 (로그 출력 등)
+                    eprintln!("히스토리를 가져오는 중 오류가 발생: {:?}", e);
+                }
+            }
+            
+        } else {
+            println!("Git / Svn 프로젝트가 아니므로 패스: {}", proj.path);
+        }
+    }
+
+    // 2. 프로젝트별로 SVN 리비전을 체크박스로 선택
+    let mut selected_histories: Vec<ProjectHistory> = Vec::new();
+    for project_history in project_histories {
+        match project_history {
+            ProjectHistory::GitHistory(proj_path, commits) => {
+                println!("=== [{}] 프로젝트 Git 리비전 선택 ===", proj_path);
+
+                if commits.is_empty() {
+                    println!("히스토리가 없습니다.");
+                    continue;
+                }
+
+                // 다중 선택(체크박스) 예시
+                // - `items()`에는 표시할 리스트를 넣습니다.
+                // - commits[i].clone()을 하기 위해 CommitInfo에 Clone이 필요합니다.
+                let selected_revisions = MultiSelect::new()
+                    .with_prompt("패치하고자 하는 리비전을 선택하세요 (스페이스바로 체크)")
+                    .items(&commits)
+                    .interact()
+                    .unwrap();
+
+                // 사용자가 체크한 항목만 추려서 새로운 벡터를 구성
+                let mut chosen_items = Vec::new();
+                for &i in &selected_revisions {
+                    chosen_items.push(commits[i].clone());
+                }
+
+                if chosen_items.is_empty() {
+                    println!("선택된 리비전이 없으므로 [{}] 프로젝트는 패치에서 제외됩니다.", proj_path);
+                } else {
+                    // 선택된 항목이 있다면 결과를 다시 ProjectHistory로 담아둠
+                    selected_histories.push(ProjectHistory::GitHistory(proj_path.clone(), chosen_items));
+                }
+            }
+
+            ProjectHistory::SvnHistory(proj_path, revision_info_list) => {
+                println!("=== [{}] 프로젝트 Svn 리비전 선택 ===", proj_path);
+
+                if revision_info_list.is_empty() {
+                    println!("히스토리가 없습니다.");
+                    continue;
+                }
+
+                // SVN 리비전 목록 체크박스 예시
+                let selected_revisions = MultiSelect::new()
+                    .with_prompt("패치하고자 하는 리비전을 선택하세요 (스페이스바로 체크)")
+                    .items(&revision_info_list)
+                    .interact()
+                    .unwrap();
+
+                let mut chosen_items = Vec::new();
+                for &i in &selected_revisions {
+                    chosen_items.push(revision_info_list[i].clone());
+                }
+
+                if chosen_items.is_empty() {
+                    println!("선택된 리비전이 없으므로 [{}] 프로젝트는 패치에서 제외됩니다.", proj_path);
+                } else {
+                    // 선택된 항목이 있다면 결과를 다시 ProjectHistory로 담아둠
+                    selected_histories.push(ProjectHistory::SvnHistory(proj_path.clone(), chosen_items));
+                }
+            }
+        }
+    }
+
+    // 3. 선택된 리비전별로 '가상의 변경 파일 목록'을 출력하고, 실제 패치 적용을 할지 확인
+    if selected_histories.is_empty() {
+        println!("적용할 리비전을 선택한 프로젝트가 없습니다. 작업을 종료합니다.");
+        return Ok(());
+    }
+
+    println!("=== 선택된 히스토리에 따른 가상 변경 파일 목록 ===");
+    let mut project_patch_infos: Vec<(String, HashSet<(String, String)>)> = Vec::new();
+    for selected_history in &selected_histories {
+        match selected_history {
+            ProjectHistory::GitHistory(proj_path, commits) => {
+                println!("=== [{}] 프로젝트 Git 가상 변경 파일 목록 ===", proj_path);
+                for commit in commits {
+                    if let affected_files =  git::get_changed_files_with_status(proj_path, &commit.commit_id).unwrap() {
+                        let mut affected_files_set: HashSet<(String, String)> = HashSet::new();
+                        for file in affected_files {
+                            if affected_files_set.insert((file.change_type.to_string(), file.path.clone())) {
+                                println!("  {}", file);
+                            }
+                        }
+                        project_patch_infos.push((proj_path.clone(), affected_files_set));
+                    };
+                }
+            }
+
+            ProjectHistory::SvnHistory(proj_path, revision_info_list) => {
+                println!("=== [{}] 프로젝트 Svn 가상 변경 파일 목록 ===", proj_path);
+                for revision_info in revision_info_list {
+                    if let affected_files =  svn::get_changed_files_in_revision(proj_path, &revision_info.revision).unwrap() {
+                        let mut affected_files_set: HashSet<(String, String)> = HashSet::new();
+                        for file in affected_files {
+                            if affected_files_set.insert((file.clone(), file.clone())) {
+                                println!("  {}", file);
+                            }
+                        }
+                        project_patch_infos.push((proj_path.clone(), affected_files_set));
+                    };
+                }
+            }
+            
+        }
+    }
+    
+    // 사용자에게 계속 진행할지 확인
+    let do_confirm = Confirm::new()
+        .with_prompt("위 변경 파일들을 대상으로 패치를 진행하시겠습니까?")
+        .default(true)
+        .interact().unwrap();
+
+    if !do_confirm {
+        println!("사용자가 패치를 취소했습니다.");
+        return Ok(());
+    }
+
+    // (4) confirm 시 build_file_path가 WAR 파일이면 unzip(폴더가 이미 있으면 삭제 후 unzip) 실행하기
+    //     이후, 더이상 프로젝트가 없으면 execute_task_with_timestamp 로직을 호출하고
+    //     각 프로젝트별 폴더 생성 후 build_file_path를 복사하는 식으로 작업 수행
+    for proj in projects {
+        if let Some(build_file) = &proj.build_file_path {
+            let build_path = Path::new(build_file);
+            if build_path.extension().and_then(|ext| ext.to_str()) == Some("war") {
+                // 이미 unzip할 폴더가 있다면 삭제
+                let unzip_dir = build_path.parent().unwrap().join("unzip_target");
+                if unzip_dir.exists() {
+                    fs::remove_dir_all(&unzip_dir)?;
+                }
+                fs::create_dir_all(&unzip_dir)?;
+
+                // 여기서는 단순히 예시 출력
+                println!("WAR 파일을 해제하는 로직을 실행합니다: {:?}", build_file);
+                // unzip_file(build_file, unzip_dir.to_str().unwrap())?;
+            }
+        }
+    }
+
+    // 예시로 모든 작업이 끝났다고 가정하고, 프로젝트별 timestamp 디렉토리에 복사
+    let now_str = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    for proj in projects {
+        // 각 프로젝트 이름(폴더명)으로 구성
+        let custom_folder = format!("{}_{}", proj.path.replace('/', "_"), now_str);
+        println!("=> 프로젝트 전용 폴더 생성 및 복사: {}", custom_folder);
+        // 실제로는 output_dir 아래에 프로젝트 이름으로 폴더 만들고, build_file_path 파일 복사 등 수행
+    }
+
+    // (5) 선택한 리비전 정보가 담긴 파일 저장(예: txt/json 등)
+    //     실제로는 "프로젝트폴더/선택된_리비전들.txt" 등을 만들어 저장하는 로직 추가
+    println!("선택된 리비전 정보를 각 프로젝트별 폴더에 기록합니다.");
+
+    // (6) 프로젝트별 리눅스 bash 스크립트 생성
+    //     실제 생성 예시 (개념):
+    println!("프로젝트별로 patch, target setting, exit 옵션이 포함된 스크립트를 생성합니다.");
+
+    println!("모든 작업이 완료되었습니다.");
+    Ok(())
+}
+
+fn test() {
+    
 }

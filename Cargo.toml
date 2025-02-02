@@ -11,3 +11,6 @@ strum_macros = "0.26.3"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.137"    # Enum to String
 zip = "2.2.2"
+chrono = "0.4.39"
+svn = { path = "libs/svn"}
+git = { path = "libs/git"}
